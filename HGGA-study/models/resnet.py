@@ -475,7 +475,7 @@ class embed_net(nn.Module):
 
             # sp_pl[sub == 0] = self.v_adapter(x_sp_f[sub == 0]).float()
             # sp_pl[sub == 1] = self.i_adapter(x_sp_f[sub == 1]).float()
-
+            sh_pl_mix = torch.zeros_like(sh_pl)
             sh_pl_mix[sub == 0], gamma_v = self.fusion_v(sh_pl[sub == 0], sp_pl[sub == 0])
             sh_pl_mix[sub == 1], gamma_i = self.fusion_i(sh_pl[sub == 1], sp_pl[sub == 1])
             # sp_IN = self.IN(x_sp_f) # 对特有特征做 InstanceNorm，提取模态无关部分
