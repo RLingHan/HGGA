@@ -442,7 +442,9 @@ class embed_net(nn.Module):
             # self.mask2 = Mask(2048)
             self.v_adapter = ModalitySpecificAdapter(in_dim=2048)
             self.i_adapter = ModalitySpecificAdapter(in_dim=2048)
-            self.fusion = ChannelWiseFusion(feat_dim=2048)
+
+            self.fusion_v = ChannelWiseFusion(feat_dim=2048)
+            self.fusion_i = ChannelWiseFusion(feat_dim=2048)
 
     def forward(self, x,sub = None):
         x2 = self.shared_module_fr(x) #(B, 512, 48, 18)
@@ -474,8 +476,8 @@ class embed_net(nn.Module):
             # sp_pl[sub == 0] = self.v_adapter(x_sp_f[sub == 0]).float()
             # sp_pl[sub == 1] = self.i_adapter(x_sp_f[sub == 1]).float()
 
-            sh_pl_mix,gamma = self.fusion(sh_pl,sp_pl)
-
+            sh_pl_mix[sub == 0], gamma_v = self.fusion(sh_pl[sub == 0], sp_pl[sub == 0])
+            sh_pl_mix[sub == 1], gamma_i = self.fusion(sh_pl[sub == 1], sp_pl[sub == 1])
             # sp_IN = self.IN(x_sp_f) # 对特有特征做 InstanceNorm，提取模态无关部分
             # m_IN = self.mask1(sp_IN) # 针对无关部分的注意力
             # m_F = self.mask2(x_sp_f) # 针对特有部分的注意力 ??
@@ -494,7 +496,7 @@ class embed_net(nn.Module):
             x_sp_f_p = None
 
         #layer4输出  共享layer4的语义特征  相互调节后的语义特征 mask前/后模态无关特征 mask前/后特别特征
-        return x_sh,  sh_pl, sh_pl_mix,sp_IN,sp_IN_p,x_sp_f,x_sp_f_p,gamma
+        return x_sh,  sh_pl, sh_pl_mix,sp_IN,sp_IN_p,x_sp_f,x_sp_f_p,gamma_v,gamma_i
 
 
 def _resnet(arch, block, layers, pretrained, progress, **kwargs):

@@ -307,7 +307,7 @@ class Baseline(nn.Module):
         #epoch = kwargs.get('epoch')
         # CNN
         #layer4输出  layer4的语义特征  相互调节后的语义特征 mask前/后模态无关特征 mask前/后特别特征
-        sh_feat, sh_pl, sp_pl, sp_IN,sp_IN_p,x_sp_f,x_sp_f_p,gamma = self.backbone(inputs,sub)
+        sh_feat, sh_pl, sp_pl, sp_IN,sp_IN_p,x_sp_f,x_sp_f_p,gamma_v,gamma_i = self.backbone(inputs,sub)
         #提取特征
 
         feats = sh_pl #layer4的语义输出
@@ -326,12 +326,12 @@ class Baseline(nn.Module):
 
         else:
             return self.train_forward(feats, sp_pl, labels,
-                                       sub, sp_IN,sp_IN_p,x_sp_f,x_sp_f_p,sh_feat_map=sh_feat,gamma=gamma, **kwargs)
+                                       sub, sp_IN,sp_IN_p,x_sp_f,x_sp_f_p,sh_feat_map=sh_feat,gamma_v=gamma_v,gamma_i=gamma_i, **kwargs)
 
 
 
     def train_forward(self, feat, sp_pl, labels,
-                       sub, sp_IN,sp_IN_p,x_sp_f,x_sp_f_p,sh_feat_map=None,gamma=None, **kwargs):
+                       sub, sp_IN,sp_IN_p,x_sp_f,x_sp_f_p,sh_feat_map=None,gamma_v=None,gamma_i=None, **kwargs):
         epoch = kwargs.get('epoch')
         metric = {}
         loss = 0
@@ -541,7 +541,8 @@ class Baseline(nn.Module):
             else:
                 logits = self.classifier(feat)
             if self.CSA1 or self.CSA2:
-                metric.update({'gamma': gamma.data})
+                metric.update({'gamma_v': gamma_v.data})
+                metric.update({'gamma_i': gamma_i.data})
                 if self.CSA1:
                     _, inter_bg_v = Bg_kl(logits[sub == 0], logits_sp[sub == 0]) #强制共享可见光 Logits 模仿特定可见光 Logits
                     _, inter_bg_i = Bg_kl(logits[sub == 1], logits_sp[sub == 1]) #强制共享红外光 Logits 模仿特定可见光 Logits
