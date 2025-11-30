@@ -462,8 +462,8 @@ class embed_net(nn.Module):
 
             # 根据模态选择
             x_sp = torch.zeros_like(x_sp_f)
-            x_sp[sub == 0] = self.v_adapter(x_sp_f[sub == 0]).float()
-            x_sp[sub == 1] = self.v_adapter(x_sp_f[sub == 1]).float()
+            x_sp[sub == 0] = self.v_adapter(x_sp_f[sub == 0])
+            x_sp[sub == 1] = self.i_adapter(x_sp_f[sub == 1])
 
             # 最后才池化
             sp_pl = gem(x_sp).squeeze()
