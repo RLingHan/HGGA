@@ -360,32 +360,68 @@ class ModalitySpecificAdapter(nn.Module):
     """
     def __init__(self, in_dim=2048, out_dim=2048, bottleneck=512):
         super().__init__()
-        # 共享编码器 (对所有模态/Adapter共享的结构)
-        self.encoder = nn.Sequential(
-            nn.Linear(in_dim, bottleneck),
-            nn.BatchNorm1d(bottleneck),
-            nn.ReLU(inplace=True),
-            nn.Dropout(0.1),
-            nn.Linear(bottleneck, bottleneck),  # 多一层
-            nn.BatchNorm1d(bottleneck),
+        # 1×1 卷积降维
+        self.conv_down = nn.Sequential(
+            nn.Conv2d(in_dim, bottleneck, 1),
+            nn.BatchNorm2d(bottleneck),
             nn.ReLU(inplace=True)
         )
-        # 最终投影层，升维到 2048
-        self.proj_up = nn.Linear(bottleneck, out_dim)
-    def forward(self, x_1d):
-        # x_1d 是 sh_pl 向量 [B, 2048]
-        feat_bottle = self.encoder(x_1d)  # [B, bottleneck]
+        # 3×3 卷积提取空间特征
+        self.conv_spatial = nn.Sequential(
+            nn.Conv2d(bottleneck, bottleneck, 3, padding=1),
+            nn.BatchNorm2d(bottleneck),
+            nn.ReLU(inplace=True)
+        )
+        # 1×1 卷积升维
+        self.conv_up = nn.Conv2d(bottleneck, in_dim, 1)
 
-        # 在这个轻量级 Adapter 中，我们直接返回经过 Bottleneck 提炼后的特征
-        # 它被训练为提取 sh_pl 中缺失的特定 ID 知识
-        sp_pl = self.proj_up(feat_bottle)  # [B, 2048]
+    def forward(self, x):
+        # x: [B, 2048, 24, 9]
+        residual = x
+        x = self.conv_down(x)  # [B, 512, 24, 9]
+        x = self.conv_spatial(x)  # [B, 512, 24, 9] 保留空间信息
+        x = self.conv_up(x)  # [B, 2048, 24, 9]
+        return x + 0.1 * residual  # 残差连接
 
-        return sp_pl
 
 # --------------------------------------------------------------------------
 
 def gem(x, p=3, eps=1e-6):
     return F.avg_pool2d(x.clamp(min=eps).pow(p), (x.size(-2), x.size(-1))).pow(1. / p)
+
+
+class ChannelWiseFusion(nn.Module):
+    """
+    为每个通道学习独立的融合权重
+    """
+    def __init__(self, feat_dim=2048, reduction=8):
+        super().__init__()
+        # SE模块风格的注意力
+        self.fc = nn.Sequential(
+            nn.Linear(feat_dim * 2, feat_dim // reduction),
+            nn.ReLU(inplace=True),
+            nn.Linear(feat_dim // reduction, feat_dim),
+            nn.Sigmoid()  # 输出[0,1]的权重
+        )
+    def forward(self, sh_pl, sp_pl):
+        """
+        Args:
+            sh_pl: [B, 2048] 共享特征
+            sp_pl: [B, 2048] 特定特征
+        Returns:
+            fused: [B, 2048] 融合特征
+        """
+        # 拼接两个特征，让网络看到全局信息
+        concat = torch.cat([sh_pl, sp_pl], dim=1)  # [B, 4096]
+        # 学习每个通道的权重
+        weights = self.fc(concat)  # [B, 2048]
+        # 加权融合 (weights控制sh的比例)
+        # 计算每个样本在所有通道上的平均权重
+        avg_sh_dependency_per_sample = torch.mean(weights, dim=1)  # [B]
+        fused = sh_pl * weights + sp_pl * (1.0 - weights)
+        #返回整个批次的全局平均值 (最接近原始 gamma)
+        avg_sh_dependency = torch.mean(avg_sh_dependency_per_sample)  # [1]
+        return fused,avg_sh_dependency
 
 
 class embed_net(nn.Module):
@@ -406,11 +442,7 @@ class embed_net(nn.Module):
             # self.mask2 = Mask(2048)
             self.v_adapter = ModalitySpecificAdapter(in_dim=2048)
             self.i_adapter = ModalitySpecificAdapter(in_dim=2048)
-            # gamma 是一个可学习的标量，用于平衡 f_sh 和 f_sp 的贡献
-            # 采用 nn.Parameter 来保证 gamma 可被优化
-            self.gamma_logit = nn.Parameter(torch.tensor(0.0, dtype=torch.float))
-            self.gamma_min = 0.70  # 最小依赖sh
-            self.gamma_max = 0.95  # 最大依赖sh
+            self.fusion = ChannelWiseFusion(feat_dim=2048)
 
     def forward(self, x,sub = None):
         x2 = self.shared_module_fr(x) #(B, 512, 48, 18)
@@ -424,15 +456,25 @@ class embed_net(nn.Module):
         if self.decompose:
             ######special structure
             x_sp_f = self.special(x2) #(B, 2048, 24, 9)
-            x_sp_f = gem(x_sp_f).squeeze()
-            x_sp_f = x_sp_f.view(x_sp_f.size(0), -1)  # Gem池化
+            # 在空间域处理
+            # x_sp_v = self.v_adapter(x_sp_f)  # [B, 2048, 24, 9]
+            # x_sp_i = self.i_adapter(x_sp_f)  # [B, 2048, 24, 9]
 
-            sp_pl[sub == 0] = self.v_adapter(x_sp_f[sub == 0]).float()
-            sp_pl[sub == 1] = self.i_adapter(x_sp_f[sub == 1]).float()
+            # 根据模态选择
+            x_sp = torch.zeros_like(x_sp_f)
+            x_sp[sub == 0] = self.v_adapter(x_sp_f[sub == 0]).float()
+            x_sp[sub == 1] = self.v_adapter(x_sp_f[sub == 1]).float()
 
-            gamma_sigmoid = torch.sigmoid(self.gamma_logit)
-            gamma = self.gamma_min + (self.gamma_max - self.gamma_min) * gamma_sigmoid
-            sh_pl_mix = sh_pl * gamma + sp_pl * (1.0 - gamma)
+            # 最后才池化
+            sp_pl = gem(x_sp).squeeze()
+            sp_pl = sp_pl.view(sp_pl.size(0), -1)  # Gem池化
+            # x_sp_f = gem(x_sp_f).squeeze()
+            # x_sp_f = x_sp_f.view(x_sp_f.size(0), -1)  # Gem池化
+
+            # sp_pl[sub == 0] = self.v_adapter(x_sp_f[sub == 0]).float()
+            # sp_pl[sub == 1] = self.i_adapter(x_sp_f[sub == 1]).float()
+
+            sh_pl_mix,gamma = self.fusion(sh_pl,sp_pl)
 
             # sp_IN = self.IN(x_sp_f) # 对特有特征做 InstanceNorm，提取模态无关部分
             # m_IN = self.mask1(sp_IN) # 针对无关部分的注意力
@@ -450,7 +492,6 @@ class embed_net(nn.Module):
             m_F = None
             sp_IN_p = None
             x_sp_f_p = None
-            x_sp = None
 
         #layer4输出  共享layer4的语义特征  相互调节后的语义特征 mask前/后模态无关特征 mask前/后特别特征
         return x_sh,  sh_pl, sh_pl_mix,sp_IN,sp_IN_p,x_sp_f,x_sp_f_p,gamma
